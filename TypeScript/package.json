@@ -1,0 +1,28 @@
+{
+  "name": "photon-voice-accessibility",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Photon (Neutron) pharmacy patient voice agent — TypeScript",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "worker": "tsx src/voice/entry.ts dev",
+    "worker:start": "tsx src/voice/entry.ts start",
+    "server": "tsx server.ts"
+  },
+  "dependencies": {
+    "@livekit/agents": "^1.9.5",
+    "@livekit/agents-plugin-silero": "^1.9.5",
+    "dotenv": "^16.4.5",
+    "livekit-server-sdk": "^2.9.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.4"
+  }
+}

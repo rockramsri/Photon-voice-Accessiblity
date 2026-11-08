@@ -1,0 +1,167 @@
+# Photon Voice Accessibility — TypeScript
+
+A voice agent for Photon (Neutron) pharmacy patients, built on the LiveKit
+Agents **Node.js** SDK (`@livekit/agents`). It is a faithful clone of the Python
+app in `../Python` — same flow, same GraphQL, same tools, same guarantees. It
+reaches a patient by phone and walks them through where their prescription is
+going; if the order can still change, it moves it to a pharmacy they pick. There
+are two ways in:
+
+- **Outbound** — a `photon:order:created` webhook triggers a call about that order.
+- **Inbound** — a patient calls the pharmacy number; a front-desk agent verifies
+  them and schedules an outbound callback about their latest order.
+
+The order is only ever discussed on the **outbound** call, and only **after the
+date of birth matches** — the order details stay out of the model's prompt until then.
+
+## How it fits together
+
+**Call flow — inbound and outbound share one worker:**
+
+![Rooms and call flow](docs/rooms.png)
+
+**System architecture — webhook, server, dispatcher, voice worker:**
+
+![Architecture](docs/architecture.png)
+
+**GraphQL / tool-call map — what runs before vs. during the call:**
+
+![Tool-call map](docs/tool-call-map.png)
+
+## Flow in words
+
+```
+photon:order:created webhook
+  -> mint an order-scoped patient JWT (from M2M client credentials)
+  -> fetch patient (name, phone, DOB, address) -> geocode address
+  -> prefetch in parallel: order, offers, mail-order pharmacies, FAQs, nearby
+  -> shape promptBlock (spoken words, no ids) + seed (ids, prices, lat/lng)
+  -> write context/<orderId>.json
+  -> dial (room metadata = {orderId, patientJwt} only)
+order agent joins
+  -> verify DOB -> order details enter the prompt -> options -> read back
+  -> commit (reroute / setOrderPharmacy) -> re-verify -> goodbye
+
+inbound call (no order on the job)
+  -> front desk greets as the pharmacy -> asks account phone + DOB
+  -> orders(filter:{patientPhone}, newest first) -> DOB must match
+  -> POST /internal/callback -> server waits CALLBACK_DELAY_S -> outbound flow
+```
+
+## Layout
+
+```
+TypeScript/
+  dispatcher.ts             order:created -> prefetch -> dial
+  server.ts                 node:http webhook server + /internal/callback
+  prompts/voice_persona.txt the fixed persona
+  docs/                     the three diagrams above
+  src/
+    config.ts               single env reader (dotenv)
+    contextStore.ts         context/<orderId>.json read/write
+    log.ts                  tiny namespaced logger (no PHI, no tokens)
+    photon/                 ALL Neutron network I/O (client, queries, prefetch,
+                            geocode, actions, patient, events, dedupe)
+    auth/                   M2M token (photonAuth) + per-order patient JWT (patientToken)
+    channels/outbound.ts    dispatch agent into room, then SIP dial
+    voice/
+      shapeContext.ts       prefetch -> promptBlock + seed; sanitizeForVoice
+      sessionState.ts       SessionState + resolve("option two" -> id)
+      spokenTime.ts         "tomorrow after four" -> Date
+      tools.ts              the agent tools (zod schemas)
+      orderAgent.ts         persona + promptBlock + tools (context gated on DOB)
+      inbound.ts            front-desk agent + callback scheduling
+      sessionFactory.ts     STT -> LLM -> TTS, pre-TTS normalizer, expressive mode
+      entry.ts              LiveKit worker (branches: order vs. inbound)
+  test/                     unit tests (pure logic, vitest)
+```
+
+## Tools
+
+| Tool | When | What it does |
+|---|---|---|
+| `verify_identity` | always | compares spoken DOB in code; DOB never enters the prompt; reveals the order context on success |
+| `search_nearby` | always | new area / name / 24h / "more" (pages from cached lat/lng) |
+| `end_call` | always | handoff line with support number, then hangs up |
+| `choose_pharmacy` | order reroutable | `rerouteOrder`, then re-reads the order to verify |
+| `set_pickup_time` | order reroutable | `setOrderPharmacy` with parsed day/time, then verifies |
+| `save_preferred_pharmacy` | order reroutable | `setPreferredPharmacy` |
+| `request_callback` | inbound only | find latest order by phone, verify DOB, schedule the callback |
+
+Write tools are **not registered** when the order can't change, so the model
+can't call what it doesn't have. They also refuse until identity is verified and
+until `confirmed=true` (sent only after a spoken read-back and a clear yes).
+
+## Design decisions
+
+- **Direct LiveKit function tools** (`llm.tool` with zod schemas), not a nested
+  agent framework — one model loop keeps latency low on a phone call.
+- **PHI never leaks early**: the order block is withheld from the prompt until
+  `verify_identity` passes (`OrderAgent.revealContext`). The powerful org-wide
+  M2M token never enters room or agent metadata — only the single-order JWT does.
+- **Inbound reuses outbound**: the front desk authenticates and hands off to the
+  same dispatcher via a delayed callback; the conversation logic lives in one place.
+- **One agent, one worker**: the Node SDK registers a single rtc session, so
+  `entry.ts` branches on whether the job carries an order (outbound vs. inbound).
+- **Stateless-ish**: the context file is deleted after the call; only a one-line
+  outcome is kept. No call recording (`record: false`).
+- **Inference-only engine**: STT/LLM/TTS all route through LiveKit Inference, so
+  no vendor keys are required. TTS is Fish S2.1 Pro; VAD is Silero.
+
+## Run it locally
+
+Everything runs from this `TypeScript/` folder (Node >= 20).
+
+**1. Install**
+```bash
+npm install
+```
+
+**2. Configure** — copy `.env.example` to `.env` and fill it in (Photon client
+id/secret, LiveKit url/key/secret, SIP trunk id, caller number).
+
+**3. Unit tests + typecheck**
+```bash
+npm test
+npm run typecheck
+```
+
+**4. Agent worker** (terminal 1)
+```bash
+npm run worker        # tsx src/voice/entry.ts dev
+```
+
+**5. Webhook server** (terminal 2)
+```bash
+npm run server        # tsx server.ts
+```
+For a public URL locally, put `ngrok http 3000` in front and register the
+`<public>/photon/webhooks` URL in Neutron. In production, Railway gives you the
+public URL (below) — no ngrok needed.
+
+**6. Trigger** — create a fresh, still-reroutable order in the Neutron app.
+
+> A real phone call needs live LiveKit + SIP credentials; it can't be exercised
+> offline. The pure logic (shaping, resolver, time parsing, GraphQL, dispatcher,
+> server) is covered by `npm test` and the smoke tests.
+
+## Deploy on Railway — two services, one repo
+
+Point Railway at this `TypeScript/` folder. Create **two services** from the same code:
+
+| Service | Start command | Public? | Purpose |
+|---|---|---|---|
+| **web** | `tsx server.ts` (or `node dist/server.js` after `npm run build`) | **yes** | its domain `+ /photon/webhooks` is the URL you give Neutron; also serves `/internal/callback` |
+| **worker** | `tsx src/voice/entry.ts start` | no | joins LiveKit rooms and runs the calls (dials out, no inbound port) |
+
+Set the same environment variables on both. Give Neutron the **web** service's
+`https://<web-domain>/photon/webhooks`. That's the only URL they need.
+
+## Notes
+
+- `TEST_PHONE_OVERRIDE` blank = the **real patient phone** is dialed.
+- `context/`, `state/`, `calls.jsonl`, `webhooks.jsonl`, `.env` hold PHI/secrets
+  and are gitignored — never pushed.
+- Signature verification is log-only (`src/photon/events.ts`).
+- Swap `TTS_MODEL` / `TTS_VOICE` to change the voice (`AGENT_DISPLAY_NAME` sets
+  the spoken name).

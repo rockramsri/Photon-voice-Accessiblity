@@ -1,0 +1,25 @@
+# Secrets + PHI — never pushed
+.env
+.env.*
+!.env.example
+
+# Runtime data (PHI)
+state/
+context/
+transcripts/
+calls.jsonl
+webhooks.jsonl
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Node / TypeScript
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+npm-debug.log*

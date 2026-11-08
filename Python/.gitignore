@@ -1,0 +1,10 @@
+.env
+state/
+context/
+transcripts/
+webhooks.jsonl
+calls.jsonl
+__pycache__/
+*.pyc
+.venv/
+venv/
