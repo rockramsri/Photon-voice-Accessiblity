@@ -59,10 +59,15 @@ async def handle_order_created(data: dict, *, force: bool = False) -> None:
     # Context for the agent. A partial prefetch still proceeds with what returned.
     point = await geocode_address(patient["address"])
     ctx = await prefetch(patient_jwt, order_id, point)
-    save_context(order_id, build_prompt_block(ctx), build_seed(ctx, order_id, point, patient, patient_id))
+    prompt_block = build_prompt_block(ctx)
+    seed = build_seed(ctx, order_id, point, patient, patient_id)
+    save_context(order_id, prompt_block, seed)  # local fallback (console / same machine)
 
     room_name = f"photon-order-{order_id}"
-    metadata = json.dumps({"orderId": order_id, "patientJwt": patient_jwt})
+    # Context rides in the job metadata so the worker — a SEPARATE Railway service with
+    # its own filesystem — gets it without a shared disk. patientJwt is single-order scoped.
+    metadata = json.dumps({"orderId": order_id, "patientJwt": patient_jwt,
+                           "promptBlock": prompt_block, "seed": seed})
     log.info("dialing order=%s -> %s%s", order_id, to,
              " (override)" if config.TEST_PHONE_OVERRIDE else "")
     result = await outbound.place_call(to, room_name=room_name, metadata=metadata)

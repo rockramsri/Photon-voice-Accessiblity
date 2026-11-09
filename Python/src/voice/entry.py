@@ -46,9 +46,15 @@ async def entrypoint(ctx: JobContext) -> None:
         await inbound_entrypoint(ctx)
         return
 
-    doc = load_context(order_id) if order_id else None
+    # Prefer context from the job metadata (set by the dispatcher). On Railway the
+    # worker and web run on different machines, so the local file won't exist here;
+    # the file is only a same-machine/console fallback.
+    if meta.get("seed") and meta.get("promptBlock"):
+        doc = {"seed": meta["seed"], "promptBlock": meta["promptBlock"]}
+    else:
+        doc = load_context(order_id) if order_id else None
     if not doc:
-        log.error("no context file for order=%s — ending", order_id or "?")
+        log.error("no context for order=%s (metadata + file both empty) — ending", order_id or "?")
         if not console:
             await ctx.delete_room()
         return

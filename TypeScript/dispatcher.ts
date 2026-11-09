@@ -49,10 +49,14 @@ export async function handleOrderCreated(data: Json, force = false): Promise<voi
 
   const point = await geocodeAddress(patient.address);
   const ctx = await prefetch(patientJwt, orderId, point);
-  saveContext(orderId, buildPromptBlock(ctx), buildSeed(ctx, orderId, point, patient, patientId));
+  const promptBlock = buildPromptBlock(ctx);
+  const seed = buildSeed(ctx, orderId, point, patient, patientId);
+  saveContext(orderId, promptBlock, seed); // local fallback (console / same machine)
 
   const roomName = `photon-order-${orderId}`;
-  const metadata = JSON.stringify({ orderId, patientJwt });
+  // Context rides in the job metadata so the worker — a SEPARATE Railway service with
+  // its own filesystem — gets it without a shared disk. patientJwt is single-order scoped.
+  const metadata = JSON.stringify({ orderId, patientJwt, promptBlock, seed });
   log.info(`dialing order=${orderId} -> ${to}${config.TEST_PHONE_OVERRIDE ? ' (override)' : ''}`);
   const result = await outbound.placeCall(to, roomName, metadata);
   if (result.ok) {

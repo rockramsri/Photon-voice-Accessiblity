@@ -31,9 +31,14 @@ async function entrypoint(ctx: JobContext): Promise<void> {
     return;
   }
 
-  const doc = loadContext(orderId);
+  // Prefer context from the job metadata (set by the dispatcher). On Railway the
+  // worker and web run on different machines, so the local file won't exist here;
+  // the file is only a same-machine/console fallback.
+  const doc = meta.seed && meta.promptBlock
+    ? { seed: meta.seed, promptBlock: meta.promptBlock }
+    : loadContext(orderId);
   if (!doc) {
-    log.error(`no context file for order=${orderId} — ending`);
+    log.error(`no context for order=${orderId} (metadata + file both empty) — ending`);
     await ctx.deleteRoom().catch(() => {});
     return;
   }
